@@ -1,0 +1,384 @@
+const queryformat = require("./query");
+const json2csv = require('json2csv').parse;
+const AWS = require('aws-sdk');
+const config = require('config');
+const ResponseMessage = require('./config/ResponseMessage.json');
+const XLSX = require("xlsx");
+const bigInt = require("big-integer");
+
+const DB = require("./db");
+const sql = require('yesql').pg;
+
+const dbSecretName = config.awsCred.dbSecretName;
+const awsSecretName = config.awsCred.awsSecretName;
+
+//Default load of aws sdk and lambda auth
+const client = new AWS.SecretsManager({
+    region: config.awsCred.region
+});
+
+const BUCKET_NAME = config.awsCred.BUCKET_NAME;
+const lambdaAuthValidate = config.lambdaAuthValidate;
+
+function authError(cname, uuid, Authorization, facilityid) {
+    let athErr = false;
+    if (cname === undefined || cname === null || cname === "null" || cname === '' ||
+        uuid === undefined || uuid === null || uuid === "null" || uuid === '' ||
+        Authorization === undefined || Authorization === null || Authorization === "null" || Authorization === '' ||
+        facilityid === undefined || facilityid === null || facilityid === "null" || facilityid === '') {
+        athErr = true;
+    }
+    return athErr;
+}
+
+function tokenValidation(authResult) {
+    let tknErr = false;
+    if (authResult === 'Deny' || authResult === 'deny') {
+        tknErr = true;
+    }
+    return tknErr;
+}
+
+function dateValidation(fromDate, toDate, selectedmonths) {
+    let dtFlag = false
+    if ((fromDate === null || fromDate === 'null' || fromDate === '') &&
+        (toDate === null || toDate === 'null' || toDate === '') &&
+        (selectedmonths === null || selectedmonths === 'null' || selectedmonths === '')) {
+        dtFlag = true;
+    }
+    return dtFlag;
+
+}
+
+function filtersValidation(filters) {
+    if (filters === null || filters === 'null' || filters === '') /* istanbul ignore next */ {
+        filters = null;
+    } else {
+        filters = JSON.stringify(filters);
+    }
+    return filters;
+}
+
+function getChunksArrOfData(queryoutput) {
+    let i, j;
+    const resArray = [], chunk = 250000;
+    for (i = 0, j = queryoutput.rows.length; i < j; i += chunk) {
+        resArray.push(queryoutput.rows.slice(i, i + chunk));
+    }
+    return resArray;
+}
+
+function setNumFloBigIntData(resArray, colnames) {
+    const parsedRows = [];
+    for (var parseVal of resArray) {
+        parseVal = JSON.parse(JSON.stringify(parseVal, colnames.split(","), 4));
+        const str = JSON.stringify(parseVal);
+        parsedRows.push(JSON.parse(str, (key, value) => {
+            return checkStrWithRegex(value);
+        }));
+    }
+    return parsedRows;
+    
+    /*for (let i = 0; i < resArray.length; i++) {
+        const str = JSON.stringify(resArray[i]);
+        const parsedRows = JSON.parse(str, (key, value) => {
+            return checkStrWithRegex(value);
+        });
+        resArray[i] = JSON.parse(JSON.stringify(parsedRows, colnames.split(","), 4));
+    }
+    return resArray;*/
+    
+}
+
+function checkStrWithRegex(value){
+    if (typeof value === 'string') {
+        // Check for numeric
+        if (/^\d+$/.test(value) && !/^0\d+/.test(value)) {
+            if (value.length < 11) {
+                return parseInt(value, 10);
+            } else {
+                return bigInt(value);
+            }
+        }
+        // Check for float
+        else if (/^\d+\.\d+$/.test(value) && !/^0\d+/.test(value.split('.')[0])) {
+            return parseFloat(value);
+        }else  if(/^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z)$/.test(value) || /^(\d{4}-\d{2}-\d{2})$/.test(value) || /^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})$/.test(value)){ // check datetime remove T and Z
+            return new Date(value);
+        }else if(/^-[1-9]\d*(\.\d+)?$/.test(value)){
+        //else if(/-[1-9]\d*(\.\d+)?$/.test(value) && !/^(\d{4}-\d{2}-\d{2})$/.test(value)){ // for negative numbers decimal and non decimal but not whole numbers which is starts from zero
+            return parseFloat(value);
+        }
+    }
+    return value;
+}
+
+function mergeChunksData(resArray){
+    let rowsData = [];
+    for (const rows of resArray) {
+        rowsData = rowsData.concat(rows);
+    }
+    return rowsData;
+}
+
+const handler = async function (event) { // without passing signed direct download
+    console.time();
+    let db = null;
+    try {
+        const response = {};
+        
+        //get AWS Cred
+        const awsData = await client.getSecretValue({ SecretId: awsSecretName }).promise();
+        const awsSecret = JSON.parse(awsData.SecretString);
+        const s3 = new AWS.S3({
+               accessKeyId: awsSecret.accessKeyId,
+               secretAccessKey: awsSecret.secretAccessKey,
+               region: config.awsCred.region
+        });
+        const lambda = new AWS.Lambda({
+             accessKeyId: awsSecret.accessKeyId,
+             secretAccessKey: awsSecret.secretAccessKey,
+             region: config.awsCred.region
+        });
+         
+        //get DB Cred
+        const dbData = await client.getSecretValue({ SecretId: dbSecretName }).promise();
+        const dbSecret = JSON.parse(dbData.SecretString);
+        const pool = await DB.connectDB(dbSecret);
+        db = await pool.connect(); // new line
+
+        const cname = event.headers.cname;
+        const uuid = event.headers.uuid;
+        const Authorization = event.headers.authorization;
+        const facilityid = event.headers.warehouses;
+        console.log(`Body Parameters is :- ${event.body}`)
+        console.log(`Headers Parameters is - ( cname is :- ${cname} , facility_id is :- ${facilityid} , uuid is :- ${uuid})`)
+        const hadErr = authError(cname, uuid, Authorization, facilityid);
+        if (hadErr === true) {
+            response.status = config.authError.message;
+            response.statuscode = config.authError.code;
+            response.response = ResponseMessage["401"]
+            return {
+                statusCode: config.authError.code,
+                body: JSON.stringify(response)
+            }
+        }
+        const params = {
+            FunctionName: lambdaAuthValidate, // token,canme,uuid validate
+            Payload: JSON.stringify({
+                "resource": "/radial/generatereport",
+                headers: {
+                    cname: cname,
+                    uuid: uuid,
+                    Authorization: Authorization
+                }
+            })
+        };
+        const lambdaResult = await lambda.invoke(params).promise();
+        const authResult = JSON.parse(lambdaResult.Payload).policyDocument.Statement[0].Effect;
+        const tokenFlag = tokenValidation(authResult)
+        if (tokenFlag === true) {
+            response.status = config.authError.message;
+            response.statuscode = config.authError.code;
+            response.response = ResponseMessage["401"]
+            return {
+                statusCode: config.authError.code,
+                body: JSON.stringify(response)
+
+            }
+        }
+
+        const today = new Date(); // getting current datetime
+
+        const mm = today.getMonth() + 1;
+        const year = today.getFullYear();
+        const month = ("0" + mm).slice(-2);
+        const day = ("0" + today.getDate()).slice(-2);
+        const hours = ("0" + today.getHours()).slice(-2);
+        const minutes = ("0" + today.getMinutes()).slice(-2);
+        const seconds = ("0" + today.getSeconds()).slice(-2);
+        const miliseconds = today.getMilliseconds();
+
+        const currentDateTime = `${year}-${month}-${day} ${hours}:${minutes}:${seconds}:${miliseconds}`;
+        const datefile = `${year}_${month}_${day}_t${hours}.${minutes}.${seconds}`;
+
+        console.log(`Current date time is :- ${currentDateTime}`);
+
+        const body = JSON.parse(event.body); // fetching body and headers parameters
+        const reportname = body.reportname;
+        const colnames = body.colnames;
+        let fromDate = body.fromDate;
+        let toDate = body.toDate;
+        let selectedmonths = body.selectedmonths;
+        let filters = body.filters;
+
+
+        const dateflag = dateValidation(fromDate, toDate, selectedmonths)
+        if (dateflag === true) {
+            response.status = config.fail.message;
+            response.statuscode = config.fail.code;
+            response.response = "fromDate/toDate and selectedmonths both not to be null"
+            return { statusCode: config.fail.code, body: JSON.stringify(response) }
+        }
+
+        filters = filtersValidation(filters);
+
+        if (fromDate === null || fromDate === 'null' || fromDate === '' ||
+            toDate === null || toDate === 'null' || toDate === '') {
+            fromDate = null;
+            toDate = null;
+        }
+
+        if (selectedmonths === null || selectedmonths === 'null' || selectedmonths === '') {
+            selectedmonths = null;
+        }
+
+        const filename = `${reportname.replace(/ /g, "_")}_${datefile}`;
+        console.log(`File name :- ${filename}`)
+
+        // create s3 file path for storing
+        const fileurl = `${cname}/${uuid}/${currentDateTime}/${filename}`;
+
+
+        await db.query("BEGIN"); // new line
+        const cursorquery = queryformat.fetchCursorName(config.schemaname, reportname, colnames, cname, facilityid, fromDate, toDate, selectedmonths, filters);
+        console.log(`Query for fetch cursor name :- ${cursorquery}`);
+        const cursorqueryoutput = await db.query(cursorquery) // new line
+
+        const query = queryformat.fetchData(cursorqueryoutput.rows[0].f_wh_builder_generate_report);
+        console.log(`Query for fetch data :- ${query}`)
+        const queryoutput = await db.query(query) // new line
+
+        const closeCursorQuery = queryformat.closeCursor(cursorqueryoutput.rows[0].f_wh_builder_generate_report);
+        console.log(`Query for close cursor :- ${closeCursorQuery}`)
+        await db.query(closeCursorQuery) // new line
+
+        await db.query("COMMIT");
+
+        
+        console.log("Total Time Taking RDS Process for fetch data");
+        console.timeEnd();
+        console.log(`Total Rows Count : :- ${queryoutput.rows.length}`);
+
+        //START =============================================================================================================
+
+        console.time();
+        let resArray = getChunksArrOfData(queryoutput);
+
+        if (resArray.length === 0) {
+            response.status = config.fail.message;
+            response.statuscode = config.fail.code;
+            response.response = "No data available for the selected dates and filters"
+            return {
+                statusCode: config.fail.code,
+                body: JSON.stringify(response)
+            }
+        } 
+            
+        resArray = setNumFloBigIntData(resArray, colnames);
+        
+
+        console.log("length of chunks " + resArray.length)
+
+
+        //merge the chunks
+        queryoutput.rows = mergeChunksData(resArray)
+        
+        console.log("Total Time Taking For Check Integer and Whole Number and Float Number and Scientific Number");
+        console.timeEnd();
+        console.log("total rows after merge of chunks " + queryoutput.rows.length);
+
+        //END =============================================================================================================
+
+
+        let format = null;
+        console.time();
+        
+        if (queryoutput.rows.length <= 100000) {
+            console.log("Excel Start")
+            const keys = Object.keys(queryoutput.rows[0]);
+            format = '.xlsx'
+            const wb = XLSX.utils.book_new(); // create workbook
+            
+            const ws = XLSX.utils.json_to_sheet(queryoutput.rows , {dateNF: "dd/mm/yyyy hh:mm:ss"}); // convert data to sheet
+
+            const wscols = getColsWidth(keys);
+            ws["!cols"] = wscols;
+            
+            // set first rows height
+            ws['!rows'] = [{hpx: 20}];
+            
+            XLSX.utils.book_append_sheet(wb, ws, "Sheet1"); // add sheet to workbook
+            const wbOpts = { bookType: "xlsx", type: "buffer" };
+            const buffer = XLSX.write(wb, wbOpts);
+            console.log("Start Uploading in S3");
+            await s3.upload({
+                Bucket: BUCKET_NAME,
+                Key: `${fileurl}${format}`,
+                Body: buffer,
+                ContentType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
+            }).promise();
+        } else {
+            console.log("CSV start")
+            format = '.csv';
+            const csvData = json2csv(queryoutput.rows);
+            console.log("Start Uploading in S3");
+            await s3.putObject({
+                Bucket: BUCKET_NAME,
+                Key: `${fileurl}${format}`,
+                Body: csvData,
+                ContentType: "text/csv"
+            }).promise();
+        }
+
+        console.log("Total Time Taking For Uploading File to S3");
+        console.timeEnd();
+        console.log("File is uploaded");
+
+        const signedUrlExpireSeconds = 60;
+        const url = s3.getSignedUrl('getObject', {
+            Bucket: BUCKET_NAME,
+            Key: `${fileurl}${format}`,
+            Expires: signedUrlExpireSeconds
+        });
+        const newUrl = url.substring(url.indexOf(uuid) + (uuid).length, url.length)
+
+
+        console.log("Downloading Start");
+
+        response.status = config.success.message;
+        response.statuscode = config.success.code;
+        response.response = newUrl;
+        return { statusCode: config.success.code, body: JSON.stringify(response) }
+
+    } catch (err) {
+        await db.query("ROLLBACK");
+        const errResponse = {}
+        console.log(err)
+        if (err.message.includes("The specified key does not exist")) {
+            errResponse.status = config.fail.message;
+            errResponse.statuscode = config.fail.code;
+            errResponse.response = "Error:Unable to upload file."
+        } else {
+            errResponse.status = config.fail.message;
+            errResponse.statuscode = config.fail.code;
+            errResponse.response = "Error:Unknown Error";
+        }
+        return { statusCode: config.fail.code, body: JSON.stringify(errResponse) }
+    } finally {
+        db.release();
+    }
+};
+
+function getColsWidth(keys){
+    // set columns width
+    const wscols = [];
+    for (const key of keys) {
+        wscols.push({ wch: key.length + 5 })
+    }
+    return wscols;
+}
+
+module.exports = {
+    handler
+}
