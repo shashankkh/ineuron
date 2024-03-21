@@ -1,0 +1,36 @@
+Subject: Update: Tag Policy and SCP Validation Step Explanation
+
+Dear Team,
+
+I hope this email finds you well. I wanted to take a moment to share the outcomes of the recent Proof of Concept (POC) we conducted on tag policy enforcement and Service Control Policies (SCPs). The aim of this POC was to ensure robust governance and compliance within our cloud environment.
+
+Here's a summary of the test outcomes:
+
+**Tag Policy Test:**
+- Without tags: Launch failed (Expected Result: Yes)
+- With random tag key and value: Launch failed (Expected Result: Yes)
+- With tag key ApplicationAcronym and wrong tag value: Launch failed (Expected Result: Yes)
+- With tag key UseCase only and correct tag value: Launch failed (Expected Result: Yes)
+- With all tag keys (ApplicationAcronym, Truck & UseCase) and correct tag value: Launch success (Expected Result: Yes)
+
+**SCP Test:**
+- Add a new random tag key/value: Success (Expected Result: Yes)
+- Remove the random tag key/value: Success (Expected Result: Yes)
+- Remove the tag Truck: Error (Expected Result: Yes)
+- Remove the tag UseCase: Error (Expected Result: Yes)
+
+While the tests have demonstrated the effectiveness of our tag policy and SCPs in enforcing governance standards, I'd like to draw your attention to a challenge we may face in real-world scenarios. 
+
+One of the challenges lies in the scalability of our tag policy, particularly regarding the ApplicationAcronym tag key. Currently, we have defined this tag key with only three values, which might not be sufficient considering we have more than 100 application acronyms within our organization. This limitation poses a potential bottleneck, especially when onboarding new applications. 
+
+In practical terms, this could result in delays and friction for application teams as they try to spin up resources in accordance with our governance policies. Moreover, it may require frequent modifications to the tag policy, leading to administrative overhead and potential disruptions in resource provisioning.
+
+To address this challenge effectively, we need to revisit our tag policy framework and devise a more scalable and flexible approach that accommodates the dynamic nature of our organization's infrastructure and application landscape.
+
+I encourage everyone to share your insights and suggestions on how we can enhance our tag policy to overcome this challenge while maintaining strong governance and compliance standards.
+
+Thank you for your attention, and please feel free to reach out if you have any questions or ideas to contribute.
+
+Best regards,
+[Your Name]  
+Cloud Engineer
