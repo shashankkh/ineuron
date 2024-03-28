@@ -1,3 +1,11 @@
+=IF(ISNUMBER(SEARCH("UseCase=",O2)), LEFT(MID(O2, SEARCH("UseCase=",O2)+LEN("UseCase="), SEARCH(",",O2,SEARCH("UseCase=",O2))-SEARCH("UseCase=",O2)-LEN("UseCase=")), LEN(MID(O2, SEARCH("UseCase=",O2)+LEN("UseCase="), SEARCH(",",O2,SEARCH("UseCase=",O2))-SEARCH("UseCase=",O2)-LEN("UseCase=")))-1), "")
+
+
+
+
+
+
+
 Subject: Update: Tag Policy and SCP Validation Step Explanation
 
 Dear Team,
