@@ -23,7 +23,10 @@ Next Steps:
 Should you require any assistance or clarification regarding this matter, please do not hesitate to reach out to our CloudOps team for support.
 
 Thank you for your prompt attention to this critical security enhancement. Your cooperation in ensuring the security of our application clusters is greatly appreciated.
+Action Required:
 
+	1.	Non-Production Environments: For non-production environments, please submit a service request to our CloudOps team detailing the changes required. Our team will promptly assist you in making the necessary modifications to your IAM policies and Resource Policies.
+	2.	Production Environments: For production-related resources, we will proceed with a formal change management process. Please be prepared to coordinate with our CloudOps team to implement the required changes in a controlled and secure manner.
 
 
 
